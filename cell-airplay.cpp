@@ -5,6 +5,7 @@
 #include <vector>
 #include "utils/netpipe.h"
 #include "utils/buffer_util.h"
+#include "libairplay/mediaserver.h"
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -21,11 +22,49 @@ extern "C" {
 #define HEADER_SIZE 12
 #define NO_PTS UINT64_C(-1)
 
+#define PIPE_PORT 6960
+
+/**/
+static void airplay_open(void *cls, char *url, float fPosition,
+			 double dPosition);
+static void airplay_play(void *cls);
+static void airplay_pause(void *cls);
+static void airplay_stop(void *cls);
+static void airplay_seek(void *cls, long fPosition);
+static void airplay_setvolume(void *cls, int volume);
+static void airplay_showphoto(void *cls, unsigned char *data, long long size);
+static long airplay_getduration(void *cls);
+static long airplay_getpostion(void *cls);
+static int airplay_isplaying(void *cls);
+static int airplay_ispaused(void *cls);
+//...
+static void audio_init(void *cls, int bits, int channels, int samplerate,
+		       int isaudio);
+static void audio_process(void *cls, const void *buffer, int buflen,
+			  uint64_t timestamp, uint32_t seqnum);
+static void audio_destory(void *cls);
+static void audio_setvolume(void *cls, int volume); //1-100
+static void audio_setmetadata(void *cls, const void *buffer, int buflen);
+static void audio_setcoverart(void *cls, const void *buffer, int buflen);
+static void audio_flush(void *cls);
+//...
+static void mirroring_play(void *cls, int width, int height, const void *buffer,
+			   int buflen, int payloadtype, uint64_t timestamp);
+static void mirroring_process(void *cls, const void *buffer, int buflen,
+			      int payloadtype, uint64_t timestamp);
+static void mirroring_stop(void *cls);
+static void mirroring_live(void *cls);
+//...
+static void sdl_audio_callback(void *cls, uint8_t *stream, int len);
+/**/
+
 struct EncodedData {
 	long long lastStartTime = 0;
 	long long lastStopTime = 0;
 	std::vector<unsigned char> bytes;
 };
+
+unsigned __stdcall threadRcv(void * para);
 
 struct AirInput {
 	obs_source_t *source;
@@ -34,6 +73,17 @@ struct AirInput {
 	PipeClient air_pipe;
 
 	HANDLE obs_rcv_pro;
+
+	uint32_t width = SCREEN_WIDTH;
+	uint32_t height = SCREEN_HEIGHT;
+
+	AirInput(obs_source_t *source_, obs_data_t *settings)
+		: source(source_),
+		  obs_pipe(PipeServer(PIPE_PORT)),
+		  air_pipe(PipeClient(PIPE_PORT))
+	{
+	}
+	~AirInput() { Stop(); }
 
 	void Receive(unsigned char *ptr, size_t size, long long pts)
 	{
@@ -57,7 +107,123 @@ struct AirInput {
 					  (unsigned char *)ptr,
 				  (unsigned char *)ptr + size);
 	}
+
+	int Start()
+	{
+		int ret = 0;
+		if (obs_pipe.Start() < 0) {
+			ret = -1;
+			goto END;
+		}
+		if (air_pipe.Start() < 0) {
+			ret = -2;
+			goto STOPOBS;
+		}
+		if (start_airfunction() < 0) {
+			ret = -3;
+			goto STOPAIR;
+		}
+
+		obs_rcv_pro = (HANDLE)_beginthreadex(NULL, 0, threadRcv, this,
+						     0, NULL);
+
+		return 0;
+	STOPAIR:
+		air_pipe.Stop();
+	STOPOBS:
+		obs_pipe.Stop();
+	END:
+		return ret;
+	}
+
+	void Stop()
+	{
+		if (obs_rcv_pro) {
+			WaitForSingleObject(obs_rcv_pro, INFINITE);
+			CloseHandle(obs_rcv_pro);
+		}
+		
+		stopMediaServer();
+		air_pipe.Stop();
+		obs_pipe.Stop();
+	}
+
+	int start_airfunction()
+	{
+		airplay_callbacks_t *ao = new airplay_callbacks_t();
+		if (!ao) {
+			blog(LOG_ERROR, "new airplay_callbacks_t failed!\n");
+			return -1;
+		}
+		memset(ao, 0, sizeof(airplay_callbacks_t));
+		ao->cls = this;
+		ao->AirPlayPlayback_Open = airplay_open;
+		ao->AirPlayPlayback_Play = airplay_play;
+		ao->AirPlayPlayback_Pause = airplay_pause;
+		ao->AirPlayPlayback_Stop = airplay_stop;
+		ao->AirPlayPlayback_Seek = airplay_seek;
+		ao->AirPlayPlayback_SetVolume = airplay_setvolume;
+		ao->AirPlayPlayback_ShowPhoto = airplay_showphoto;
+		ao->AirPlayPlayback_GetDuration = airplay_getduration;
+		ao->AirPlayPlayback_GetPostion = airplay_getpostion;
+		ao->AirPlayPlayback_IsPlaying = airplay_isplaying;
+		ao->AirPlayPlayback_IsPaused = airplay_ispaused;
+		//...
+		ao->AirPlayAudio_Init = audio_init;
+		ao->AirPlayAudio_Process = audio_process;
+		ao->AirPlayAudio_destroy = audio_destory;
+		ao->AirPlayAudio_SetVolume = audio_setvolume;
+		ao->AirPlayAudio_SetMetadata = audio_setmetadata;
+		ao->AirPlayAudio_SetCoverart = audio_setcoverart;
+		ao->AirPlayAudio_Flush = audio_flush;
+		//...
+		ao->AirPlayMirroring_Play = mirroring_play;
+		ao->AirPlayMirroring_Process = mirroring_process;
+		ao->AirPlayMirroring_Stop = mirroring_stop;
+		ao->AirPlayMirroring_Live = mirroring_live;
+
+		int r = startMediaServer((char *)AIR_DEVICE_NAME, SCREEN_WIDTH,
+					 SCREEN_HEIGHT, ao);
+		if (r < 0) {
+			blog(LOG_ERROR ,"start media server error code : -1\n");
+			return -2;
+		} else if (r > 0) {
+			blog(LOG_ERROR ,"start media server error code : 1\n");
+			return -3;
+		}
+		return 0;
+	}
 };
+
+unsigned __stdcall threadRcv(void *para)
+{
+	AirInput *input = reinterpret_cast<AirInput *>(para);
+	if (!input)
+		return -1;
+	uint8_t header[HEADER_SIZE];
+	memset(header, 0, HEADER_SIZE);
+	while (true) {
+		int ret = input->obs_pipe.Recive((char *)header, HEADER_SIZE);
+		if (ret != HEADER_SIZE) {
+			blog(LOG_ERROR,
+			     "obs pipe recive head length invalid: %d", ret);
+			return -2;
+		}
+		uint64_t pts = buffer_read64be(header);
+		uint32_t len = buffer_read32be(&header[8]);
+
+		char *data = new char[len];
+		ret = input->obs_pipe.Recive(data, len);
+		if (ret < len) {
+			blog(LOG_ERROR,
+			     "obs pipe recive data length invalid. expected:%d, facted:%d", len, ret);
+			delete[] data;
+			return -3;
+		}
+		input->Receive((uint8_t*)data, len, pts);
+		delete[] data;
+	}
+}
 
 /**/
 /*airplay*/
@@ -232,8 +398,15 @@ void mirroring_play(void *cls, int width, int height, const void *buffer,
 	uint8_t hdr[HEADER_SIZE];
 	buffer_write64be(&hdr[0], pts);
 	buffer_write32be(&hdr[8], len);
-	ptr->air_pipe.Send((char*)hdr, HEADER_SIZE);
-	ptr->air_pipe.Send((char *)data, len);
+	int ret = 0;
+	ret = ptr->air_pipe.Send((char*)hdr, HEADER_SIZE);
+	if (ret < HEADER_SIZE)
+		blog(LOG_ERROR, "send failed! expect:%d, facted:%d",
+		     HEADER_SIZE, ret);
+	ret = ptr->air_pipe.Send((char *)data, len);
+	if (ret < HEADER_SIZE)
+		blog(LOG_ERROR, "send failed! expect:%d, facted:%d",
+		     HEADER_SIZE, ret);
 	
 	free(data);
 }
@@ -273,8 +446,14 @@ void mirroring_process(void *cls, const void *buffer, int buflen,
 		uint8_t hdr[12];
 		buffer_write64be(&hdr[0], pts);
 		buffer_write32be(&hdr[8], len);
-		ptr->air_pipe.Send((char *)hdr, 12);
+		int ret = ptr->air_pipe.Send((char *)hdr, 12);
+		if (ret < HEADER_SIZE)
+			blog(LOG_ERROR, "send failed! expect:%d, facted:%d",
+			     HEADER_SIZE, ret);
 		ptr->air_pipe.Send((char *)mirrbuff, len);
+		if (ret < HEADER_SIZE)
+			blog(LOG_ERROR, "send failed! expect:%d, facted:%d",
+			     HEADER_SIZE, ret);
 
 	} else if (payloadtype == 1) {
 		int spscnt;
@@ -315,8 +494,14 @@ void mirroring_process(void *cls, const void *buffer, int buflen,
 		uint8_t hdr[HEADER_SIZE];
 		buffer_write64be(&hdr[0], pts);
 		buffer_write32be(&hdr[8], len);
-		ptr->air_pipe.Send((char *)hdr, HEADER_SIZE);
+		int ret = ptr->air_pipe.Send((char *)hdr, HEADER_SIZE);
+		if (ret < HEADER_SIZE)
+			blog(LOG_ERROR, "send failed! expect:%d, facted:%d",
+			     HEADER_SIZE, ret);
 		ptr->air_pipe.Send((char *)data, len);
+		if (ret < HEADER_SIZE)
+			blog(LOG_ERROR, "send failed! expect:%d, facted:%d",
+			     HEADER_SIZE, ret);
 
 		free(data);
 	}
@@ -341,4 +526,62 @@ void sdl_audio_callback(void *cls, uint8_t *stream, int len)
 	UNUSED_PARAMETER(cls);
 	UNUSED_PARAMETER(stream);
 	UNUSED_PARAMETER(len);
+}
+
+/*------------------------------------------------------------------*/
+
+static const char *GetCellAirPlayName(void *)
+{
+	return obs_module_text("AirPlayDevice");
+}
+
+static void *CreateCellAirPlay(obs_data_t *settings, obs_source_t *source)
+{
+	AirInput *airshow = nullptr;
+
+	try {
+		airshow = new AirInput(source, settings);
+		if (airshow->Start() < 0) {
+			blog(LOG_ERROR, "cell airplay start failed!");
+			delete (airshow);
+			airshow = nullptr;
+		}
+	} catch (const char *error) {
+		blog(LOG_ERROR, "Could not create device '%s': %s",
+		     obs_source_get_name(source), error);
+	}
+
+	return airshow;
+}
+
+static void DestroyCellAirPlay(void *data)
+{
+	delete reinterpret_cast<AirInput *>(data);
+}
+
+static uint32_t GetWidth(void *data)
+{
+	AirInput* ptr = reinterpret_cast<AirInput *>(data);
+	return ptr->width;
+}
+
+static uint32_t GetHeight(void *data)
+{
+	AirInput *ptr = reinterpret_cast<AirInput *>(data);
+	return ptr->height;
+}
+
+void RegisterDShowSource()
+{
+	obs_source_info info = {};
+	info.id = "airplay_input";
+	info.type = OBS_SOURCE_TYPE_INPUT;
+	info.output_flags = OBS_SOURCE_VIDEO;
+	info.get_name = GetCellAirPlayName;
+	info.create = CreateCellAirPlay;
+	info.destroy = DestroyCellAirPlay;
+	info.get_width = GetWidth;
+	info.get_height = GetHeight;
+	info.icon_type = OBS_ICON_TYPE_CAMERA;
+	obs_register_source(&info);
 }
