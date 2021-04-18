@@ -1,80 +1,66 @@
-if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/libdshowcapture/dshowcapture.hpp")
-	message(STATUS "libdshowcapture submodule not found!  Please fetch submodules.  cell plugin disabled.")
-	return()
-endif()
-
-project(cell)
+project(cellplugin)
 
 find_package(FFmpeg REQUIRED COMPONENTS avcodec avutil)
 include_directories(${FFMPEG_INCLUDE_DIRS})
 
-set(cell_HEADERS
-	#encode-dstr.hpp
-	ffmpeg-decode.h)
-
 set(MODULE_DESCRIPTION "OBS cell plugin module")
 
-configure_file(${CMAKE_SOURCE_DIR}/cmake/winrc/obs-module.rc.in win-dshow.rc)
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/virtualcam-guid.h.in ${CMAKE_CURRENT_BINARY_DIR}/virtualcam-guid.h)
-include_directories(${CMAKE_CURRENT_BINARY_DIR})
+#configure_file(${CMAKE_SOURCE_DIR}/cmake/winrc/obs-module.rc.in win-dshow.rc)
+#configure_file(${CMAKE_CURRENT_SOURCE_DIR}/virtualcam-guid.h.in ${CMAKE_CURRENT_BINARY_DIR}/virtualcam-guid.h)
+#include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
-set(win-dshow_SOURCES
-	win-dshow.cpp
-	#win-dshow-encoder.cpp
-	dshow-plugin.cpp
-	ffmpeg-decode.c
-	win-dshow.rc)
-
-set(virtualcam_LIBS
-	"${CMAKE_CURRENT_SOURCE_DIR}/vcam_strm/vcam_strm.lib"
+file(GLOB util_SOURCES
+	${CMAKE_CURRENT_SOURCE_DIR}/utils/*.c
+	${CMAKE_CURRENT_SOURCE_DIR}/utils/*.cpp
 )
-file(GLOB virtualcam-output_SOURCES
-	tiny-nv12-scale.c
-	${CMAKE_CURRENT_SOURCE_DIR}/vcam_strm/vcam.cpp
-	shared-memory-queue.c
-	virtualcam.c)
-file(GLOB virtualcam-output_HEADERS
-	tiny-nv12-scale.h
-	${CMAKE_CURRENT_SOURCE_DIR}/vcam_strm/vcam.h
-	${CMAKE_CURRENT_SOURCE_DIR}/vcam_strm/vcam_strm.h
-	shared-memory-queue.h)
+file(GLOB util_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/utils/*.h)
 
+file(GLOB airplay_SOURCES
+	${CMAKE_CURRENT_SOURCE_DIR}/libairplay/*.cpp
+	cell-airplay.cpp
+)
+file(GLOB airplay_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/libairplay/*.h)
+set(airplay_LIBS ${CMAKE_CURRENT_SOURCE_DIR}/libairplay/libs/*.lib)
 
-file(GLOB libairplay_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/libairplay/*.cpp)
-file(GLOB libairplay_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/libairplay/*.h)
-set(AIRPLAY_LIBS
-	"${CMAKE_CURRENT_SOURCE_DIR}/libairplay/libs/postproc.lib"
-	"${CMAKE_CURRENT_SOURCE_DIR}/libairplay/libs/fdk-aac.lib"
-	"${CMAKE_CURRENT_SOURCE_DIR}/libairplay/libs/mycrypt.lib"
-	"${CMAKE_CURRENT_SOURCE_DIR}/libairplay/libs/AirPlay.lib"
+file(GLOB vcam_SOURCES
+	${CMAKE_CURRENT_SOURCE_DIR}/libvcam/*.cpp
+	cell-vcam.cpp
+)
+file(GLOB vcam_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/libvcam/*.h)
+set(vcam_LIBS ${CMAKE_CURRENT_SOURCE_DIR}/libvcam/*.lib)
+
+set(cellplugin_SOURCES
+	cell-plugin.cpp
 )
 
-
-add_library(win-dshow MODULE
-	${win-dshow_SOURCES}
-	${win-dshow_HEADERS}
-	${virtualcam-output_SOURCES}
-	${virtualcam-output_HEADERS}
-	#${libdshowcapture_SOURCES}
-	#${libdshowcapture_HEADERS}
-	${libairplay_SOURCES}
-	${libairplay_HEADERS}
-	)
-target_link_libraries(win-dshow
+add_library(cellplugin MODULE
+	${cellplugin_SOURCES}
+	${cellplugin_HEADERS}
+	${vcam_SOURCES}
+	${vcam_HEADERS}
+	${airplay_SOURCES}
+	${airplay_HEADERS}
+	${util_SOURCES}
+	${util_HEADERS}
+)
+target_link_libraries(cellplugin
 	libobs
-	${virtualcam_LIBS}
-	${AIRPLAY_LIBS}
-	strmiids
-	ksuser
-	wmcodecdspuuid
-	w32-pthreads
-	${FFMPEG_LIBRARIES})
-set_target_properties(win-dshow PROPERTIES FOLDER "plugins/win-dshow")
+	${vcam_LIBS}
+	${airplay_LIBS}
+	#strmiids
+	#ksuser
+	#wmcodecdspuuid
+	#w32-pthreads
+	${FFMPEG_LIBRARIES}
+)
+set_target_properties(cellplugin PROPERTIES FOLDER "plugins/cellplugin")
 
-source_group("libairplay\\Source Files" FILES ${libairplay_SOURCES})
-source_group("libairplay\\Header Files" FILES ${libairplay_HEADERS})
+source_group("libairplay\\Source Files" FILES ${airplay_SOURCES})
+source_group("libairplay\\Header Files" FILES ${airplay_HEADERS})
 
-source_group("cellcamera\\Source Files" FILES ${virtualcam-output_SOURCES})
-source_group("cellcamera\\Header Files" FILES ${virtualcam-output_HEADERS})
+source_group("livcam\\Source Files" FILES ${vcam_SOURCES})
+source_group("livcam\\Header Files" FILES ${vcam_HEADERS})
 
-install_obs_plugin_with_data(win-dshow data)
+install_obs_plugin_with_data(cellplugin data)
+
+message(STATUS "Cell plugin enabled.")
