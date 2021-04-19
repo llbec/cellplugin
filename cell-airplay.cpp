@@ -6,6 +6,7 @@
 #include "utils/netpipe.h"
 #include "utils/buffer_util.h"
 #include "libairplay/mediaserver.h"
+#include "utils/ffmpeg-decode.h"
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -64,6 +65,17 @@ struct EncodedData {
 	std::vector<unsigned char> bytes;
 };
 
+class Decoder {
+	struct ffmpeg_decode decode;
+
+public:
+	inline Decoder() { memset(&decode, 0, sizeof(decode)); }
+	inline ~Decoder() { ffmpeg_decode_free(&decode); }
+
+	inline operator ffmpeg_decode *() { return &decode; }
+	inline ffmpeg_decode *operator->() { return &decode; }
+};
+
 unsigned __stdcall threadRcv(void * para);
 
 struct AirInput {
@@ -71,6 +83,11 @@ struct AirInput {
 	EncodedData encodedVideo;
 	PipeServer obs_pipe;
 	PipeClient air_pipe;
+
+	video_range_type range = VIDEO_RANGE_DEFAULT;
+	Decoder video_decoder;
+	obs_source_frame2 frame;
+	bool flip = false;
 
 	HANDLE obs_rcv_pro;
 
@@ -82,6 +99,7 @@ struct AirInput {
 		  obs_pipe(PipeServer(PIPE_PORT)),
 		  air_pipe(PipeClient(PIPE_PORT))
 	{
+		memset(&frame, 0, sizeof(frame));
 	}
 	~AirInput() { Stop(); }
 
@@ -93,10 +111,10 @@ struct AirInput {
 		startTime = pts != NO_PTS ? pts : AV_NOPTS_VALUE;
 
 		if (hasTime) {
-			/*SendToCallback(isVideo, encodedVideo.bytes.data(),
-				       encodedVideo.bytes.size(),
-				       encodedVideo.lastStartTime,
-				       encodedVideo.lastStopTime, roll);*/
+			OnEncodedVideoData(AV_CODEC_ID_H264,
+					   encodedVideo.bytes.data(),
+					   encodedVideo.bytes.size(),
+					   startTime);
 
 			encodedVideo.bytes.resize(0);
 			encodedVideo.lastStartTime = startTime;
@@ -105,7 +123,48 @@ struct AirInput {
 
 		encodedVideo.bytes.insert(encodedVideo.bytes.end(),
 					  (unsigned char *)ptr,
-				  (unsigned char *)ptr + size);
+					  (unsigned char *)ptr + size);
+	}
+
+	void OnEncodedVideoData(enum AVCodecID id, unsigned char *data,
+				size_t size, long long ts)
+	{
+		/* If format changes, free and allow it to recreate the decoder */
+		if (ffmpeg_decode_valid(video_decoder) &&
+		    video_decoder->codec->id != id) {
+			ffmpeg_decode_free(video_decoder);
+		}
+
+		if (!ffmpeg_decode_valid(video_decoder)) {
+			/* Only use MJPEG hardware decoding on resolutions higher
+		 * than 1920x1080.  The reason why is because we want to strike
+		 * a reasonable balance between hardware and CPU usage. */
+			bool useHW = false;
+			if (ffmpeg_decode_init(video_decoder, id, useHW) < 0) {
+				blog(LOG_WARNING,
+				     "Could not initialize video decoder");
+				return;
+			}
+		}
+
+		bool got_output;
+		bool success = ffmpeg_decode_video(video_decoder, data, size,
+						   &ts, range, &frame,
+						   &got_output);
+		if (!success) {
+			blog(LOG_WARNING, "Error decoding video");
+			return;
+		}
+
+		if (got_output) {
+			frame.timestamp = (uint64_t)ts * 100;
+			if (flip)
+				frame.flip = !frame.flip;
+#if LOG_ENCODED_VIDEO_TS
+			blog(LOG_DEBUG, "video ts: %llu", frame.timestamp);
+#endif
+			obs_source_output_video2(source, &frame);
+		}
 	}
 
 	int Start()
@@ -214,11 +273,19 @@ unsigned __stdcall threadRcv(void *para)
 
 		char *data = new char[len];
 		ret = input->obs_pipe.Recive(data, len);
-		if (ret < len) {
-			blog(LOG_ERROR,
-			     "obs pipe recive data length invalid. expected:%d, facted:%d", len, ret);
-			delete[] data;
-			return -3;
+		int count = 0;
+		while (ret < len) {
+			if (count > 2) {
+				blog(LOG_ERROR,
+				     "obs pipe recive data length invalid. expected:%d, facted:%d",
+				     len, ret);
+				delete[] data;
+				return -3;
+			}
+			blog(LOG_WARNING,
+			     "obs pipe recive data continue... expected:%d, facted:%d", len, ret);
+			ret += input->obs_pipe.Recive(&data[ret], len - ret);
+			count++;
 		}
 		input->Receive((uint8_t*)data, len, pts);
 		delete[] data;
@@ -576,7 +643,7 @@ void RegisterDShowSource()
 	obs_source_info info = {};
 	info.id = "airplay_input";
 	info.type = OBS_SOURCE_TYPE_INPUT;
-	info.output_flags = OBS_SOURCE_VIDEO;
+	info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_ASYNC;
 	info.get_name = GetCellAirPlayName;
 	info.create = CreateCellAirPlay;
 	info.destroy = DestroyCellAirPlay;
