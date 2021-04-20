@@ -638,7 +638,7 @@ static uint32_t GetHeight(void *data)
 	return ptr->height;
 }
 
-void RegisterDShowSource()
+void RegisterCellAirSource()
 {
 	obs_source_info info = {};
 	info.id = "airplay_input";
