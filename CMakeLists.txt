@@ -16,7 +16,7 @@ file(GLOB util_SOURCES
 file(GLOB util_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/utils/*.h)
 
 file(GLOB airplay_SOURCES
-	${CMAKE_CURRENT_SOURCE_DIR}/libairplay/*.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/libairplay/*.c
 	cell-airplay.cpp
 )
 file(GLOB airplay_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/libairplay/*.h)
